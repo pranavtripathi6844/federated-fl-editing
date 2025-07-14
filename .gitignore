@@ -14,3 +14,6 @@ __pycache__/
 data/
 *.tar.gz
 *.sh
+Miniconda3-latest-Linux-x86_64.sh
+data/cifar-100-python.tar.gz
+data/cifar-100-python/train
