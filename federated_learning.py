@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import time
 import os
@@ -16,6 +16,11 @@ from vision_transformer import vit_small, vit_tiny
 from data_utils import create_iid_split, create_non_iid_split, get_data_statistics, print_data_statistics
 from model_editing import SparseSGDM, calibrate_gradient_mask_alternative
 
+try:
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+except Exception:
+    local_rank = 0
+
 class FederatedLearning:
     def __init__(self, config):
         self.config = config
@@ -24,8 +29,9 @@ class FederatedLearning:
         torch.manual_seed(config['seed'])
         random.seed(config['seed'])
         np.random.seed(config['seed'])
-        print(f"Federated Learning initialized with {config['num_clients']} clients")
-        print(f"Using device: {self.device}")
+        if local_rank == 0:
+            print(f"Federated Learning initialized with {config['num_clients']} clients")
+            print(f"Using device: {self.device}")
 
     def create_model(self):
         if self.config['model_type'] == 'vit_tiny':
@@ -33,7 +39,8 @@ class FederatedLearning:
         else:
             model = vit_small(patch_size=16, num_classes=100)
         model.to(self.device)
-        print(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
+        if local_rank == 0:
+            print(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
         return model
 
     def create_client_datasets(self, trainset):
@@ -51,7 +58,8 @@ class FederatedLearning:
                 self.config.get('samples_per_client')
             )
         stats = get_data_statistics(client_datasets)
-        print_data_statistics(stats)
+        if local_rank == 0:
+            print_data_statistics(stats)
         return client_datasets
 
     def train_client(self, client_id, model, client_dataset, round_num):
@@ -68,7 +76,8 @@ class FederatedLearning:
                 momentum=0.9
             )
             if round_num == 0 or (round_num % self.config.get('mask_recalibration_freq', 10) == 0):
-                print(f"Calibrating gradient masks for client {client_id}")
+                if local_rank == 0:
+                    print(f"Calibrating gradient masks for client {client_id}")
                 gradient_masks = calibrate_gradient_mask_alternative(
                     model, client_loader, self.device,
                     mask_type=self.config.get('mask_type', 'least_sensitive'),
@@ -91,7 +100,7 @@ class FederatedLearning:
             for inputs, labels in client_loader:
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
                 optimizer.zero_grad()
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast():
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
                 scaler.scale(loss).backward()
@@ -122,7 +131,7 @@ class FederatedLearning:
         with torch.no_grad():
             for inputs, labels in test_loader:
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast():
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
                 test_loss += loss.item()
@@ -134,7 +143,8 @@ class FederatedLearning:
         return test_loss, test_acc
 
     def run_federated_training(self, trainset, valset, testset):
-        print("Starting Federated Learning training...")
+        if local_rank == 0:
+            print("Starting Federated Learning training...")
         global_model = self.create_model()
         client_datasets = self.create_client_datasets(trainset)
         test_loader = DataLoader(testset, batch_size=self.config['batch_size'], num_workers=4)
@@ -144,8 +154,9 @@ class FederatedLearning:
             round_start_time = time.time()
             num_participating = max(1, int(self.config['client_fraction'] * self.config['num_clients']))
             participating_clients = random.sample(range(self.config['num_clients']), num_participating)
-            print(f"\nRound {round_num + 1}/{self.config['num_rounds']}")
-            print(f"Participating clients: {participating_clients}")
+            if local_rank == 0:
+                print(f"\nRound {round_num + 1}/{self.config['num_rounds']}")
+                print(f"Participating clients: {participating_clients}")
             client_models = []
             client_losses = []
             for client_id in participating_clients:
@@ -155,7 +166,8 @@ class FederatedLearning:
                 )
                 client_models.append(client_state)
                 client_losses.append(client_loss)
-                print(f"Client {client_id} trained, loss: {client_loss:.4f}")
+                if local_rank == 0:
+                    print(f"Client {client_id} trained, loss: {client_loss:.4f}")
             global_state = self.aggregate_models(client_models)
             global_model.load_state_dict(global_state)
             test_loss, test_acc = self.evaluate_model(global_model, test_loader)
@@ -163,24 +175,35 @@ class FederatedLearning:
             self.writer.add_scalar('Loss/client_avg', avg_client_loss, round_num)
             self.writer.add_scalar('Loss/test', test_loss, round_num)
             self.writer.add_scalar('Accuracy/test', test_acc, round_num)
+            # Add intermediate accuracy logging for Optuna pruning
+            if local_rank == 0:
+                try:
+                    with open(os.path.join(self.config['log_dir'], 'intermediate_acc.txt'), 'a') as f:
+                        f.write(f"{test_acc}\n")
+                except Exception as e:
+                    print(f"[WARNING] Could not write intermediate_acc.txt: {e}")
             round_time = time.time() - round_start_time
-            print(f"Round {round_num + 1} completed in {round_time/60:.2f} minutes")
-            print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
+            if local_rank == 0:
+                print(f"Round {round_num + 1} completed in {round_time/60:.2f} minutes")
+                print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
             if test_acc > best_acc:
                 best_acc = test_acc
-                torch.save(global_model.state_dict(), self.config['best_model_path'])
-                print(f"New best model saved with accuracy: {best_acc:.2f}%")
+                if local_rank == 0:
+                    torch.save(global_model.state_dict(), self.config['best_model_path'])
+                    print(f"New best model saved with accuracy: {best_acc:.2f}%")
             if (round_num + 1) % self.config.get('checkpoint_freq', 10) == 0:
-                torch.save({
-                    'round': round_num,
-                    'model_state_dict': global_model.state_dict(),
-                    'best_acc': best_acc,
-                    'config': self.config
-                }, self.config['checkpoint_path'])
-                print(f"Checkpoint saved at round {round_num + 1}")
+                if local_rank == 0:
+                    torch.save({
+                        'round': round_num,
+                        'model_state_dict': global_model.state_dict(),
+                        'best_acc': best_acc,
+                        'config': self.config
+                    }, self.config['checkpoint_path'])
+                    print(f"Checkpoint saved at round {round_num + 1}")
         total_time = time.time() - total_start_time
-        print(f"\nFederated Learning completed!")
-        print(f"Total time: {total_time/3600:.2f} hours")
-        print(f"Best test accuracy: {best_acc:.2f}%")
+        if local_rank == 0:
+            print(f"\nFederated Learning completed!")
+            print(f"Total time: {total_time/3600:.2f} hours")
+            print(f"Best test accuracy: {best_acc:.2f}%")
         self.writer.close()
         return global_model, best_acc 

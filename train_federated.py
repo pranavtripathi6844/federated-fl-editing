@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import time
 import os
@@ -18,6 +18,13 @@ from federated_learning_mps import FederatedLearning
 
 import optuna
 import subprocess
+
+try:
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+except Exception:
+    local_rank = 0
+
+print("Script started", flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description='Federated Learning with Model Editing')
@@ -89,25 +96,28 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
     with open(os.path.join(args.log_dir, 'config.json'), 'w') as f:
         json.dump(config, f, indent=2)
-    print("Configuration:")
-    for key, value in config.items():
-        print(f"  {key}: {value}")
-    print("\nLoading CIFAR-100 datasets...")
+    if local_rank == 0:
+        print("Configuration:")
+        for key, value in config.items():
+            print(f"  {key}: {value}")
+        print("\nLoading CIFAR-100 datasets...")
     trainset, valset, testset = create_cifar100_datasets(
         root='./data', 
         image_size=args.image_size
     )
-    print(f"Data loaded: {len(trainset)} training samples, {len(valset)} validation samples, {len(testset)} test samples")
+    if local_rank == 0:
+        print(f"Data loaded: {len(trainset)} training samples, {len(valset)} validation samples, {len(testset)} test samples")
     try:
         fl = FederatedLearning(config)
         global_model, best_acc = fl.run_federated_training(trainset, valset, testset)
     except Exception as e:
         print(f"[ERROR] Training failed: {e}")
         best_acc = 0.0
-    print(f"\nFinal Results:")
-    print(f"Best test accuracy: {best_acc:.2f}%")
-    print(f"Configuration saved to: {os.path.join(args.log_dir, 'config.json')}")
-    print(f"Logs saved to: {args.log_dir}")
+    if local_rank == 0:
+        print(f"\nFinal Results:")
+        print(f"Best test accuracy: {best_acc:.2f}%")
+        print(f"Configuration saved to: {os.path.join(args.log_dir, 'config.json')}")
+        print(f"Logs saved to: {args.log_dir}")
     # Write best accuracy to file for Optuna
     with open(os.path.join(args.log_dir, 'best_acc.txt'), 'w') as f:
         f.write(str(best_acc))
@@ -138,25 +148,21 @@ def optuna_objective(trial):
         "--force_reset"
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print(f"[Optuna] Trial log_dir: {log_dir}")
+    if local_rank == 0:
+        print(f"[Optuna] Trial log_dir: {log_dir}")
     if result.returncode != 0:
-        print(f"[Optuna] Subprocess failed. stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+        if local_rank == 0:
+            print(f"[Optuna] Subprocess failed. stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
     best_acc = 0.0
     try:
         with open(f"{log_dir}/best_acc.txt") as f:
             best_acc = float(f.read())
-        print(f"[Optuna] Read best_acc.txt: {best_acc}")
+        if local_rank == 0:
+            print(f"[Optuna] Read best_acc.txt: {best_acc}")
     except Exception as e:
-        print(f"[Optuna] Could not read best_acc.txt: {e}")
+        if local_rank == 0:
+            print(f"[Optuna] Could not read best_acc.txt: {e}")
     return best_acc
 
 if __name__ == '__main__':
-    import sys
-    if '--optuna_search' in sys.argv:
-        sys.argv.remove('--optuna_search')
-        study = optuna.create_study(direction="maximize")
-        study.optimize(optuna_objective, n_trials=10)  # You can increase n_trials
-        print("Best params:", study.best_params)
-        print("Best accuracy:", study.best_value)
-    else:
-        main() 
+    main() 

@@ -162,13 +162,13 @@ python main_dino.py --help
 ### Vanilla DINO training :sauropod:
 Run DINO with ViT-small network on a single node with 8 GPUs for 100 epochs with the following command. Training time is 1.75 day and the resulting checkpoint should reach 69.3% on k-NN eval and 74.0% on linear eval. We provide [training](https://dl.fbaipublicfiles.com/dino/example_runs_logs/dino_vanilla_deitsmall16_log.txt) and [linear evaluation](https://dl.fbaipublicfiles.com/dino/example_runs_logs/dino_vanilla_deitsmall16_eval.txt) logs (with batch size 256 at evaluation time) for this run to help reproducibility.
 ```
-python -m torch.distributed.launch --nproc_per_node=8 main_dino.py --arch vit_small --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
+torchrun --nproc_per_node=8 main_dino.py --arch vit_small --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
 ```
 
 ### Multi-node training
 We use Slurm and [submitit](https://github.com/facebookincubator/submitit) (`pip install submitit`). To train on 2 nodes with 8 GPUs each (total 16 GPUs):
 ```
-python run_with_submitit.py --nodes 2 --ngpus 8 --arch vit_small --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
+torchrun --nproc_per_node=8 main_dino.py --arch vit_small --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
 ```
 
 <details>
@@ -177,7 +177,7 @@ DINO with ViT-base network.
 </summary>
 
 ```
-python run_with_submitit.py --nodes 2 --ngpus 8 --use_volta32 --arch vit_base  --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
+torchrun --nproc_per_node=8 main_dino.py --arch vit_base  --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
 ```
 
 </details>
@@ -194,7 +194,7 @@ Full command.
 </summary>
 
 ```
-python run_with_submitit.py --arch vit_small --epochs 300 --teacher_temp 0.07 --warmup_teacher_temp_epochs 30 --norm_last_layer false --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
+torchrun --arch vit_small --epochs 300 --teacher_temp 0.07 --warmup_teacher_temp_epochs 30 --norm_last_layer false --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
 ```
 
 </details>
@@ -204,7 +204,7 @@ The resulting pretrained model should reach 73.3% on k-NN eval and 76.0% on line
 ### ResNet-50 and other convnets trainings
 This code also works for training DINO on convolutional networks, like ResNet-50 for example. We highly recommend to adapt some optimization arguments in this case. For example following is a command to train DINO on ResNet-50 on a single node with 8 GPUs for 100 epochs. We provide [training logs](https://dl.fbaipublicfiles.com/dino/example_runs_logs/dino_rn50_log.txt) and [final checkpoint](https://dl.fbaipublicfiles.com/dino/example_runs_logs/dino_rn50_checkpoint.pth) for this run.
 ```
-python -m torch.distributed.launch --nproc_per_node=8 main_dino.py --arch resnet50 --optimizer sgd --lr 0.03 --weight_decay 1e-4 --weight_decay_end 1e-4 --global_crops_scale 0.14 1 --local_crops_scale 0.05 0.14 --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
+torchrun --nproc_per_node=8 main_dino.py --arch resnet50 --optimizer sgd --lr 0.03 --weight_decay 1e-4 --weight_decay_end 1e-4 --global_crops_scale 0.14 1 --local_crops_scale 0.05 0.14 --data_path /path/to/imagenet/train --output_dir /path/to/saving_dir
 ```
 
 ## Self-attention visualization
@@ -250,17 +250,17 @@ python video_generation.py --input_path output/attention \
 ## Evaluation: k-NN classification on ImageNet
 To evaluate a simple k-NN classifier with a single GPU on a pre-trained model, run:
 ```
-python -m torch.distributed.launch --nproc_per_node=1 eval_knn.py --data_path /path/to/imagenet
+torchrun --nproc_per_node=1 eval_knn.py --data_path /path/to/imagenet
 ```
 If you choose not to specify `--pretrained_weights`, then DINO reference weights are used by default. If you want instead to evaluate checkpoints from a run of your own, you can run for example:
 ```
-python -m torch.distributed.launch --nproc_per_node=1 eval_knn.py --pretrained_weights /path/to/checkpoint.pth --checkpoint_key teacher --data_path /path/to/imagenet 
+torchrun --nproc_per_node=1 eval_knn.py --pretrained_weights /path/to/checkpoint.pth --checkpoint_key teacher --data_path /path/to/imagenet 
 ```
 
 ## Evaluation: Linear classification on ImageNet
 To train a supervised linear classifier on frozen weights on a single node with 8 gpus, run:
 ```
-python -m torch.distributed.launch --nproc_per_node=8 eval_linear.py --data_path /path/to/imagenet
+torchrun --nproc_per_node=8 eval_linear.py --data_path /path/to/imagenet
 ```
 
 We release the logs and weights from evaluating the different models:

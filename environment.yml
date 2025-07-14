@@ -1,0 +1,24 @@
+name: dino-fl
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+  - nvidia
+
+dependencies:
+  - python=3.8
+  - pip
+  - numpy
+  - pillow
+  - pytorch=2.2.0
+  - torchvision=0.17.0
+  - cudatoolkit=11.8  # Use 11.8 for best compatibility with conda and PyTorch 2.x
+  - matplotlib
+  - tqdm
+  - scikit-image
+  - opencv
+  - tensorboard
+  - pip:
+      - optuna
+      - submitit
+      - flwr[simulation] 

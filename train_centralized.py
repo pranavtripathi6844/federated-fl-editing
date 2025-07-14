@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from vision_transformer import vit_small, vit_tiny
 import time
@@ -13,6 +13,15 @@ from torch.utils.data import random_split
 import torchvision
 import torchvision.transforms as transforms
 from typing import Tuple, Optional
+from model_editing import SparseSGDM, calibrate_gradient_mask_alternative
+
+# Set device based on LOCAL_RANK for distributed training
+try:
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+except Exception:
+    local_rank = 0
+torch.cuda.set_device(local_rank)
+device = torch.device("cuda", local_rank)
 
 def parse_args():
     """Parse command line arguments with optimizations for RTX 2060."""
@@ -65,6 +74,14 @@ def parse_args():
     parser.add_argument('--device', type=str, default='auto',
                        help='Device to use (auto/cuda/cpu)')
     
+    # Model editing arguments
+    parser.add_argument('--use_model_editing', action='store_true', help='Enable model editing (sparse gradient masking)')
+    parser.add_argument('--mask_type', type=str, default='least_sensitive', choices=['least_sensitive', 'most_sensitive', 'lowest_magnitude', 'highest_magnitude', 'random'], help='Mask type for model editing')
+    parser.add_argument('--sparsity_ratio', type=float, default=0.5, help='Sparsity ratio for gradient mask (default: 0.5)')
+    parser.add_argument('--num_calibration_rounds', type=int, default=3, help='Number of calibration rounds for mask')
+    parser.add_argument('--num_samples_per_round', type=int, default=1000, help='Samples per calibration round')
+    parser.add_argument('--mask_recalibration_freq', type=int, default=10, help='Recalibrate mask every N epochs')
+    
     return parser.parse_args()
 
 def setup_device(args) -> torch.device:
@@ -75,28 +92,34 @@ def setup_device(args) -> torch.device:
             # Print GPU info
             gpu_name = torch.cuda.get_device_name(0)
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            print(f"Using GPU: {gpu_name} ({gpu_memory:.1f}GB)")
+            if local_rank == 0:
+                print(f"Using GPU: {gpu_name} ({gpu_memory:.1f}GB)")
         else:
             device = torch.device('cpu')
-            print("CUDA not available, using CPU")
+            if local_rank == 0:
+                print("CUDA not available, using CPU")
     else:
         device = torch.device(args.device)
     
-    print(f"Device: {device}")
+    if local_rank == 0:
+        print(f"Device: {device}")
     return device
 
 def create_model(args) -> nn.Module:
     """Create model based on arguments."""
     if args.model == 'vit_tiny':
         model = vit_tiny(patch_size=args.patch_size, num_classes=100)
-        print("Using ViT-Tiny model")
+        if local_rank == 0:
+            print("Using ViT-Tiny model")
     else:
         model = vit_small(patch_size=args.patch_size, num_classes=100)
-        print("Using ViT-Small model")
+        if local_rank == 0:
+            print("Using ViT-Small model")
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+    if local_rank == 0:
+        print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
     
     return model
 
@@ -181,7 +204,7 @@ def train_epoch(model, trainloader, criterion, optimizer, scaler, device, args):
         optimizer.zero_grad()
         
         if args.mixed_precision:
-            with autocast(device_type='cuda', dtype=torch.float16):
+            with autocast():
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
             
@@ -209,7 +232,7 @@ def train_epoch(model, trainloader, criterion, optimizer, scaler, device, args):
         correct += predicted.eq(labels).sum().item()
         
         # Progress update every 50 batches
-        if batch_idx % 50 == 0:
+        if batch_idx % 50 == 0 and local_rank == 0:
             print(f"Batch {batch_idx}/{len(trainloader)}, Loss: {loss.item():.4f}")
     
     train_loss = running_loss / len(trainloader)
@@ -229,7 +252,7 @@ def validate(model, valloader, criterion, device, args):
             inputs, labels = inputs.to(device), labels.to(device)
             
             if args.mixed_precision:
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast():
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
             else:
@@ -273,18 +296,21 @@ def save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss,
     if is_best:
         best_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
         torch.save(model.state_dict(), best_path)
-        print(f"Best model saved: {best_path}")
+        if local_rank == 0:
+            print(f"Best model saved: {best_path}")
 
 def load_checkpoint(model, optimizer, scheduler, args):
     """Load checkpoint if exists and compatible."""
     checkpoint_path = os.path.join(args.checkpoint_dir, 'centralized_checkpoint.pth')
     
     if args.force_reset:
-        print("Force reset enabled, ignoring existing checkpoints")
+        if local_rank == 0:
+            print("Force reset enabled, ignoring existing checkpoints")
         return 0, math.inf, 0
     
     if os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from {checkpoint_path}")
+        if local_rank == 0:
+            print(f"Loading checkpoint from {checkpoint_path}")
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
             
@@ -298,10 +324,11 @@ def load_checkpoint(model, optimizer, scheduler, args):
                 }
                 
                 if saved_config != current_config:
-                    print(f"Model configuration mismatch!")
-                    print(f"Saved: {saved_config}")
-                    print(f"Current: {current_config}")
-                    print("Starting from scratch due to configuration change")
+                    if local_rank == 0:
+                        print(f"Model configuration mismatch!")
+                        print(f"Saved: {saved_config}")
+                        print(f"Current: {current_config}")
+                        print("Starting from scratch due to configuration change")
                     return 0, math.inf, 0
             
             # Try to load model state dict
@@ -314,28 +341,32 @@ def load_checkpoint(model, optimizer, scheduler, args):
                 best_val_loss = checkpoint.get('best_val_loss', math.inf)
                 patience_counter = checkpoint.get('patience_counter', 0)
                 
-                print(f"Resumed from epoch {start_epoch} with best val loss {best_val_loss:.4f}")
+                if local_rank == 0:
+                    print(f"Resumed from epoch {start_epoch} with best val loss {best_val_loss:.4f}")
                 return start_epoch, best_val_loss, patience_counter
                 
             except RuntimeError as e:
-                print(f"Model state dict mismatch: {e}")
-                print("Starting from scratch due to model architecture change")
+                if local_rank == 0:
+                    print(f"Model state dict mismatch: {e}")
+                    print("Starting from scratch due to model architecture change")
                 return 0, math.inf, 0
                 
         except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-            print("Starting from scratch")
+            if local_rank == 0:
+                print(f"Error loading checkpoint: {e}")
+                print("Starting from scratch")
             return 0, math.inf, 0
     else:
-        print("No checkpoint found, starting from scratch")
+        if local_rank == 0:
+            print("No checkpoint found, starting from scratch")
         return 0, math.inf, 0
 
 def main():
     """Main training function."""
     args = parse_args()
     
-    # Setup device
-    device = setup_device(args)
+    # Setup device (override with distributed device)
+    # device is already set above for distributed training
     
     # Create model
     model = create_model(args)
@@ -346,14 +377,30 @@ def main():
     
     # Setup training components
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(
-        model.parameters(), 
-        lr=args.lr, 
-        momentum=args.momentum, 
-        weight_decay=args.weight_decay
-    )
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = GradScaler() if args.mixed_precision else None
+    
+    # Model editing logic
+    if args.use_model_editing:
+        print("[Model Editing] Using SparseSGDM optimizer and gradient mask calibration.")
+        optimizer = SparseSGDM(model.parameters(), lr=args.lr, momentum=args.momentum)
+        # Initial mask calibration
+        print(f"[Model Editing] Calibrating gradient mask (type={args.mask_type}, sparsity={args.sparsity_ratio})...")
+        gradient_masks = calibrate_gradient_mask_alternative(
+            model, trainloader, device,
+            mask_type=args.mask_type,
+            sparsity_ratio=args.sparsity_ratio,
+            num_calibration_rounds=args.num_calibration_rounds,
+            num_samples_per_round=args.num_samples_per_round
+        )
+        optimizer.set_gradient_masks(gradient_masks)
+    else:
+        optimizer = optim.SGD(
+            model.parameters(), 
+            lr=args.lr, 
+            momentum=args.momentum, 
+            weight_decay=args.weight_decay
+        )
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     
     # Setup logging
     os.makedirs(args.log_dir, exist_ok=True)
@@ -365,11 +412,24 @@ def main():
     )
     
     # Training loop
-    print(f"Starting training for {args.epochs} epochs from epoch {start_epoch}")
+    if local_rank == 0:
+        print(f"Starting training for {args.epochs} epochs from epoch {start_epoch}")
     total_start_time = time.time()
     
     for epoch in range(start_epoch, args.epochs):
         epoch_start_time = time.time()
+        
+        # Recalibrate mask if needed
+        if args.use_model_editing and (epoch == 0 or (epoch % args.mask_recalibration_freq == 0)):
+            print(f"[Model Editing] Recalibrating gradient mask at epoch {epoch+1}...")
+            gradient_masks = calibrate_gradient_mask_alternative(
+                model, trainloader, device,
+                mask_type=args.mask_type,
+                sparsity_ratio=args.sparsity_ratio,
+                num_calibration_rounds=args.num_calibration_rounds,
+                num_samples_per_round=args.num_samples_per_round
+            )
+            optimizer.set_gradient_masks(gradient_masks)
         
         # Train
         train_loss, train_acc = train_epoch(
@@ -390,10 +450,11 @@ def main():
         writer.add_scalar('Learning_rate', scheduler.get_last_lr()[0], epoch)
         
         epoch_time = time.time() - epoch_start_time
-        print(f"Epoch {epoch+1}/{args.epochs} - "
-              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% - "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}% - "
-              f"Time: {epoch_time/60:.2f}min")
+        if local_rank == 0:
+            print(f"Epoch {epoch+1}/{args.epochs} - "
+                  f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% - "
+                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}% - "
+                  f"Time: {epoch_time/60:.2f}min")
         
         # Early stopping
         is_best = val_loss < best_val_loss
@@ -411,25 +472,30 @@ def main():
             )
         
         # Early stopping check
-        if patience_counter >= args.patience:
+        if patience_counter >= args.patience and local_rank == 0:
             print(f"Early stopping triggered at epoch {epoch+1}")
             break
     
     # Final evaluation
-    print("Evaluating on test set...")
+    if local_rank == 0:
+        print("Evaluating on test set...")
     test_loss, test_acc = validate(model, testloader, criterion, device, args)
-    print(f"Final Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
+    if local_rank == 0:
+        print(f"Final Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
     
     # Save final model
     final_path = os.path.join(args.checkpoint_dir, 'centralized_model_final.pth')
     torch.save(model.state_dict(), final_path)
-    print(f"Final model saved: {final_path}")
+    if local_rank == 0:
+        print(f"Final model saved: {final_path}")
     
     # Training summary
     total_time = time.time() - total_start_time
-    print(f"Training completed in {total_time/3600:.2f} hours")
+    if local_rank == 0:
+        print(f"Training completed in {total_time/3600:.2f} hours")
     print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Final test accuracy: {test_acc:.2f}%")
+    if local_rank == 0:
+        print(f"Final test accuracy: {test_acc:.2f}%")
     
     writer.close()
 

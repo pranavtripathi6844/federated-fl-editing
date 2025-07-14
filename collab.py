@@ -67,7 +67,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler  # Updated import for autocast
+from torch.cuda.amp import autocast, GradScaler  # Updated import for autocast
 from torch.utils.tensorboard import SummaryWriter  # For logging
 from vision_transformer import vit_small  # From dino repo (adjust import if needed)
 import time
@@ -120,7 +120,7 @@ for epoch in range(start_epoch, num_epochs):
     for inputs, labels in trainloader:
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
-        with torch.amp.autocast('cuda'):  # Fixed syntax
+        with autocast():  # Fixed syntax
             outputs = model(inputs)
             loss = criterion(outputs, labels)
         scaler.scale(loss).backward()
@@ -139,7 +139,7 @@ for epoch in range(start_epoch, num_epochs):
     with torch.no_grad():
         for inputs, labels in valloader:
             inputs, labels = inputs.to(device), labels.to(device)
-            with torch.amp.autocast('cuda'):  # Fixed syntax
+            with autocast():  # Fixed syntax
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
             val_loss += loss.item()
@@ -189,7 +189,7 @@ total = 0
 with torch.no_grad():
     for inputs, labels in testloader:
         inputs, labels = inputs.to(device), labels.to(device)
-        with torch.amp.autocast('cuda'):  # Fixed syntax
+        with autocast():  # Fixed syntax
             outputs = model(inputs)
             loss = criterion(outputs, labels)
         test_loss += loss.item()
@@ -283,7 +283,7 @@ masks = calibrate_mask(model, trainloader_small, threshold=0.2, rounds=2)
 print("Gradient masks calibrated.")
 
 from torch.optim import SGD
-from torch.amp import autocast  # Correct import for new syntax
+from torch.cuda.amp import autocast  # Correct import for new syntax
 import torch.nn as nn
 
 # Updated SparseSGDM to handle mask dict (unchanged from your code)
@@ -312,13 +312,12 @@ for epoch in range(num_fine_epochs):
     for inputs, labels in trainloader:
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
-        with torch.amp.autocast('cuda'):  # Fixed syntax
+        with autocast():  # Fixed syntax
             outputs = model(inputs)
             loss = criterion(outputs, labels)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        running_loss += loss.item()
     print(f"Fine-tune Epoch {epoch+1}: Loss {running_loss / len(trainloader):.4f}")
 
 torch.save(model.state_dict(), '/content/drive/MyDrive/fl_project/sparse_finetuned_model.pth')

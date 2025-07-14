@@ -1,0 +1,23 @@
+{
+  "image_size": 128,
+  "batch_size": 1024,
+  "model_type": "vit_small",
+  "num_clients": 100,
+  "client_fraction": 0.1,
+  "num_rounds": 100,
+  "local_epochs": 4,
+  "learning_rate": 0.01,
+  "data_distribution": "iid",
+  "num_classes_per_client": 5,
+  "use_model_editing": false,
+  "mask_type": "least_sensitive",
+  "sparsity_ratio": 0.5,
+  "num_calibration_rounds": 3,
+  "num_samples_per_round": 1000,
+  "mask_recalibration_freq": 10,
+  "seed": 42,
+  "log_dir": "./logs_federated",
+  "checkpoint_freq": 10,
+  "best_model_path": "best_model_fl_iid.pth",
+  "checkpoint_path": "checkpoint_fl_iid.pth"
+}

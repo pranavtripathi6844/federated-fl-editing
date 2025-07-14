@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 from collections import defaultdict
 
@@ -35,20 +35,20 @@ def compute_fisher_information(model, dataloader, device, num_samples=1000):
         if param.requires_grad:
             fisher_info[name] = torch.zeros_like(param.data)
     sample_count = 0
-    with torch.no_grad():
-        for batch_idx, (inputs, labels) in enumerate(dataloader):
-            if sample_count >= num_samples:
-                break
-            inputs, labels = inputs.to(device), labels.to(device)
-            with autocast(device_type='cuda', dtype=torch.float16):
-                outputs = model(inputs)
-                loss = nn.CrossEntropyLoss()(outputs, labels)
-            model.zero_grad()
-            loss.backward()
-            for name, param in model.named_parameters():
-                if param.requires_grad and param.grad is not None:
-                    fisher_info[name] += param.grad.data ** 2
-            sample_count += inputs.size(0)
+    # Removed 'with torch.no_grad():' so gradients are enabled
+    for batch_idx, (inputs, labels) in enumerate(dataloader):
+        if sample_count >= num_samples:
+            break
+        inputs, labels = inputs.to(device), labels.to(device)
+        with autocast():
+            outputs = model(inputs)
+            loss = nn.CrossEntropyLoss()(outputs, labels)
+        model.zero_grad()
+        loss.backward()
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                fisher_info[name] += param.grad.data ** 2
+        sample_count += inputs.size(0)
     for name in fisher_info:
         fisher_info[name] /= sample_count
     return fisher_info
