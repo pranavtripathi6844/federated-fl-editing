@@ -10,3 +10,7 @@ __pycache__/
 *.ipynb_checkpoints/
 *.tmp
 *.log
+# Large files and datasets
+data/
+*.tar.gz
+*.sh
