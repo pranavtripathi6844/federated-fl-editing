@@ -82,13 +82,11 @@ def main():
         'best_model_path': f'best_model_fl_{args.data_distribution}.pth',
         'checkpoint_path': f'checkpoint_fl_{args.data_distribution}.pth'
     }
-    # Handle force_reset: clear log_dir and checkpoints
     if args.force_reset:
         import shutil
         if os.path.exists(args.log_dir):
             print(f"[force_reset] Removing log_dir: {args.log_dir}")
             shutil.rmtree(args.log_dir)
-        # Remove checkpoints if present
         for fname in [f'best_model_fl_{args.data_distribution}.pth', f'checkpoint_fl_{args.data_distribution}.pth']:
             if os.path.exists(fname):
                 print(f"[force_reset] Removing checkpoint: {fname}")
@@ -118,13 +116,8 @@ def main():
         print(f"Best test accuracy: {best_acc:.2f}%")
         print(f"Configuration saved to: {os.path.join(args.log_dir, 'config.json')}")
         print(f"Logs saved to: {args.log_dir}")
-    # Write best accuracy to file for Optuna
     with open(os.path.join(args.log_dir, 'best_acc.txt'), 'w') as f:
         f.write(str(best_acc))
-
-# Optuna objective for hyperparameter search
-# Always uses vit_small for fair comparison with centralized
-# Reads best_acc.txt for robust metric extraction
 
 def optuna_objective(trial):
     learning_rate = trial.suggest_categorical('learning_rate', [0.1, 0.05, 0.01, 0.005, 0.001])

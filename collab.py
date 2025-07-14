@@ -723,6 +723,10 @@ class FlowerClient(fl.client.NumPyClient):
                 correct += predicted.eq(labels).sum().item()
         return float(loss / len(self.valloader)), len(self.valloader.dataset), {"accuracy": float(correct / total)}
 
+# Create IID clients and loaders
+clients_iid = iid_sharding(trainset, K=100)
+client_loaders = [(DataLoader(clients_iid[i], batch_size=128, shuffle=True, num_workers=2, pin_memory=True),
+                   DataLoader(valset, batch_size=128, num_workers=2, pin_memory=True)) for i in range(100)]
 
 # Client function
 def client_fn(cid: str):
@@ -996,7 +1000,7 @@ fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=100,
     client_resources={"num_cpus": 1, "num_gpus": 1.0},
-    config=fl.server.ServerConfig(num_rounds=10) # Reduced to 10 rounds for quicker test
+    config=fl.server.ServerConfig(num_rounds=10)
 )
 
 # Save final global model (add after simulation if needed)
@@ -1239,7 +1243,7 @@ fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=100,
     client_resources={"num_cpus": 1, "num_gpus": 1.0},
-    config=fl.server.ServerConfig(num_rounds=10) # Reduced to 10 rounds for quicker test
+    config=fl.server.ServerConfig(num_rounds=10)
 )
 
 # Save final global model (add after simulation if needed)
